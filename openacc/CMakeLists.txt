@@ -2,3 +2,6 @@
 add_executable(openacc_async_ptr open_acc_async_ptr.f90)
 target_link_libraries(openacc_async_ptr OpenACC::OpenACC_Fortran)
 
+add_executable(openacc_out_of_bounds openacc_out_of_bounds.f90)
+target_link_libraries(openacc_out_of_bounds OpenACC::OpenACC_Fortran)
+
