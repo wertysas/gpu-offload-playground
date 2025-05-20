@@ -98,6 +98,37 @@ contains
     end do
   end subroutine kernel
 
+  subroutine kernel_gpu(i, j, cos_sza, sw, lw, okay)
+    integer,                  intent(in)    :: i,j
+    real(kind=jprb), target,  intent(inout) :: cos_sza(:)
+    real(kind=jprb), target,  intent(inout) :: sw(:,:)
+    real(kind=jprb), target,  intent(inout) :: lw(:,:)
+    logical,                  intent(inout) :: okay
+
+    type(single_level)  :: level
+    type(flux)          :: fluxes
+    integer             :: iloop, jloop
+    !$acc routine vector
+
+    ! associate type member pointers to arrays
+    level%cos_sza => cos_sza(:)
+    fluxes%sw => sw(:,:)
+    fluxes%lw => lw(:,:)
+
+    !$acc loop vector
+    do jloop=1,j
+      do iloop=1,i
+        if (fluxes%sw(iloop,jloop) /= 1) okay = .false.
+        fluxes%sw(iloop,jloop) = 10*iloop+jloop
+        if (fluxes%lw(iloop,jloop) /= 2) okay = .false.
+        fluxes%lw(iloop,jloop) = 100*iloop + jloop
+      end do
+    end do
+    do iloop = 1,i
+      if (level%cos_sza(iloop) /= 0.) okay = .false.
+      level%cos_sza(iloop) = iloop
+    end do
+  end subroutine kernel_gpu
 
   subroutine driver(i,j,k)
     integer, intent(in) :: i,j,k
@@ -135,6 +166,55 @@ contains
     call fields%final()
 
   end subroutine driver
+
+  subroutine driver_gpu(i,j,k)
+    integer, intent(in) :: i,j,k
+
+    type(field_data)          :: fields
+    real(kind=jprb), pointer  :: cos_sza_gpu(:,:), flux_sw_gpu(:,:,:), flux_lw_gpu(:,:,:)
+    integer                   :: iloop, jloop, kloop
+    logical                   :: okay = .true.
+    
+    ! initialise field data and copy fields to device
+    call fields%init(i,j,k)
+    call fields%f_single_level_cos_sza%get_device_data_rdwr(cos_sza_gpu)
+    call fields%f_flux_sw%get_device_data_rdwr(flux_sw_gpu)
+    call fields%f_flux_lw%get_device_data_rdwr(flux_lw_gpu)
+
+    ! open acc structured data region
+    !$acc data copy(okay) present(cos_sza_gpu, flux_sw_gpu, flux_lw_gpu)
+    ! call kernel with device pointer slices
+    !$acc parallel loop gang vector_length(16)
+    do kloop=1,k
+      call kernel_gpu(i,j, cos_sza_gpu(:,kloop), flux_sw_gpu(:,:,kloop), flux_lw_gpu(:,:,kloop), okay)
+    end do
+    !$acc end data
+
+    ! copy fields back to host
+    call fields%f_single_level_cos_sza%sync_host_rdwr()
+    call fields%f_flux_sw%sync_host_rdwr()
+    call fields%f_flux_lw%sync_host_rdwr()
+
+    ! verify that data was corectly transferred to device
+    if ( .not. okay) print *, "ERROR wrong fields values on device"
+    ! verify that fields have been updated
+    do kloop=1,k
+      call fields%update_view(kloop)
+      do jloop=1,j
+        do iloop=1,i
+          if (fields%flux_sw(iloop,jloop) /= 10*iloop+jloop) print *, "ERROR wrong sw flux value after kernel: ", fields%flux_sw(iloop,jloop)
+          if (fields%flux_lw(iloop,jloop) /= 100*iloop+jloop) print *, "ERROR wrong lw flux value after kernel: ", fields%flux_lw(iloop,jloop)
+        end do
+      end do
+      do iloop=1,i
+        if (fields%single_level_cos_sza(iloop) /= iloop) print *, "ERROR wrong cos_sza value after kernel: ", fields%single_level_cos_sza(iloop)
+      end do
+    end do
+
+    ! delete and clean up field data
+    call fields%final()
+
+  end subroutine driver_gpu
 
 end module scheme_mod
 
